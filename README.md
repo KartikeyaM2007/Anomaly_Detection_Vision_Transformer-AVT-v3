@@ -85,6 +85,45 @@ kernels. The deployed platform does not need SRU.
 - Live alert hysteresis to avoid low-score alert spam
 - Optional Screen Focus mode for testing with a video playing on another screen
 
+## Screenshots
+
+The training and MP4 inference notebooks in `notebooks/` were used to produce
+the process and result screenshots below.
+
+### Training Process
+
+`notebooks/UCF_Crime_Anomaly_Detection_Training.ipynb` trains the temporal
+Transformer on extracted UCF-Crime VideoMAE/ViT features, tracks validation
+metrics, and saves the best checkpoint to `artifacts/checkpoints/best_model.pt`.
+
+![Training curves](docs/screenshots/training-curves.png)
+
+### Training Results
+
+The same notebook evaluates the best checkpoint with confusion matrix, ROC, PR,
+and per-category accuracy reports.
+
+![Test evaluation](docs/screenshots/test-evaluation.png)
+
+![Per-category accuracy](docs/screenshots/per-category-accuracy.png)
+
+### MP4 Inference Process
+
+`notebooks/Anomaly_Detection_MP4_Inference_VideoMAE.ipynb` loads an MP4, builds
+overlapping 16-frame clips, extracts VideoMAE features, and scores the video
+with the trained anomaly model.
+
+![Inference timeline](docs/screenshots/inference-timeline.png)
+
+![Inference frame grid](docs/screenshots/inference-frame-grid.png)
+
+### Localhost Result View
+
+The Flask dashboard at `http://127.0.0.1:5000/` displays the deployed result
+view for an uploaded sample MP4, including the peak threat score and timeline.
+
+![Localhost dashboard result](docs/screenshots/localhost-results.png)
+
 ## API
 
 | Endpoint | Method | Purpose |
