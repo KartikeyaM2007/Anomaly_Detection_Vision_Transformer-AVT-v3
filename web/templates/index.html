@@ -171,12 +171,22 @@
         </section>
 
         <section>
-          <h2>Runtime</h2>
+          <h2>Server Inference</h2>
           <dl class="runtime">
             <div><dt>Device</dt><dd id="device">--</dd></div>
             <div><dt>Checkpoint</dt><dd id="checkpoint">--</dd></div>
             <div><dt>Threshold</dt><dd id="threshold">--</dd></div>
           </dl>
+        </section>
+
+        <section>
+          <h2>Your Browser Hardware</h2>
+          <dl class="runtime">
+            <div><dt>Graphics</dt><dd id="clientGpu">Detecting...</dd></div>
+            <div><dt>CPU Threads</dt><dd id="clientCpu">--</dd></div>
+            <div><dt>Memory</dt><dd id="clientMemory">--</dd></div>
+          </dl>
+          <p class="runtime-note">Browser hardware is local to your laptop. The Hugging Face model still runs on the server device above.</p>
         </section>
       </aside>
 

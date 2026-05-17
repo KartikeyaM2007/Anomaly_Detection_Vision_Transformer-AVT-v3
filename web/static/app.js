@@ -18,6 +18,9 @@ const els = {
   device: document.getElementById("device"),
   checkpoint: document.getElementById("checkpoint"),
   threshold: document.getElementById("threshold"),
+  clientGpu: document.getElementById("clientGpu"),
+  clientCpu: document.getElementById("clientCpu"),
+  clientMemory: document.getElementById("clientMemory"),
   thresholdInput: document.getElementById("thresholdInput"),
   thresholdValue: document.getElementById("thresholdValue"),
   liveThresholdInput: document.getElementById("liveThresholdInput"),
@@ -92,6 +95,32 @@ async function loadHealth() {
   if (health.error) {
     els.cameraState.textContent = health.error;
   }
+}
+
+function getWebGLRenderer() {
+  const canvas = document.createElement("canvas");
+  const gl =
+    canvas.getContext("webgl2") ||
+    canvas.getContext("webgl") ||
+    canvas.getContext("experimental-webgl");
+  if (!gl) return null;
+
+  const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+  if (debugInfo) {
+    return gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+  }
+  return gl.getParameter(gl.RENDERER);
+}
+
+function loadClientHardware() {
+  const renderer = getWebGLRenderer();
+  els.clientGpu.textContent = renderer || "Unavailable in this browser";
+  els.clientCpu.textContent = navigator.hardwareConcurrency
+    ? `${navigator.hardwareConcurrency} logical threads`
+    : "Unavailable";
+  els.clientMemory.textContent = navigator.deviceMemory
+    ? `${navigator.deviceMemory} GB reported`
+    : "Unavailable";
 }
 
 function openInfoModal() {
@@ -504,4 +533,5 @@ loadHealth().catch((err) => {
   els.runtimeStatus.textContent = err.message;
   els.runtimeStatus.className = "status bad";
 });
+loadClientHardware();
 resetWorkflow();

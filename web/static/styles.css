@@ -436,6 +436,12 @@ dt {
   margin: 14px 0 0;
 }
 
+.runtime-note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 dd {
   margin: 6px 0 0;
 }
