@@ -462,6 +462,51 @@ input[type="file"] {
   padding: 14px;
 }
 
+.terminal-panel {
+  overflow: hidden;
+  background: #05070a;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 14px;
+}
+
+.terminal-header {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #10151c;
+  border-bottom: 1px solid var(--line);
+}
+
+.terminal-header span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.terminal-header button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.analysis-terminal {
+  min-height: 190px;
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  color: #d7e1ea;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #000;
+}
+
 .workflow-header {
   display: flex;
   align-items: center;

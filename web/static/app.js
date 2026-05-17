@@ -32,6 +32,8 @@ const els = {
   analysisState: document.getElementById("analysisState"),
   analysisTimer: document.getElementById("analysisTimer"),
   analysisSteps: document.getElementById("analysisSteps"),
+  analysisTerminal: document.getElementById("analysisTerminal"),
+  clearTerminalBtn: document.getElementById("clearTerminalBtn"),
   visualSummary: document.getElementById("visualSummary"),
   analysisMetrics: document.getElementById("analysisMetrics"),
   frameGallery: document.getElementById("frameGallery"),
@@ -45,6 +47,8 @@ let analysisStartedAt = null;
 let analysisTimerId = null;
 let workflowId = null;
 let activeStep = "queued";
+let terminalStartedAt = null;
+let activeEventSource = null;
 
 const stepOrder = ["queued", "uploading", "frames", "features", "scoring", "completed"];
 const stepLabels = {
@@ -72,6 +76,32 @@ function fmtTime(seconds) {
 
 function fmtSeconds(seconds) {
   return `${Number(seconds || 0).toFixed(2)}s`;
+}
+
+function terminalTime() {
+  if (!terminalStartedAt) return "00:00.000";
+  const elapsed = performance.now() - terminalStartedAt;
+  const minutes = Math.floor(elapsed / 60000);
+  const seconds = Math.floor((elapsed % 60000) / 1000);
+  const millis = Math.floor(elapsed % 1000);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function resetTerminal(fileName = "") {
+  terminalStartedAt = performance.now();
+  els.analysisTerminal.textContent = [
+    "Windows PowerShell",
+    "Copyright (C) Microsoft Corporation. All rights reserved.",
+    "",
+    `PS avt> analyze ${fileName || "upload.mp4"}`,
+  ].join("\n");
+  els.analysisTerminal.scrollTop = els.analysisTerminal.scrollHeight;
+}
+
+function appendTerminalLine(message, level = "info") {
+  const prefix = level === "error" ? "ERR" : level === "complete" ? "OK " : "   ";
+  els.analysisTerminal.textContent += `\n[${terminalTime()}] ${prefix} ${message}`;
+  els.analysisTerminal.scrollTop = els.analysisTerminal.scrollHeight;
 }
 
 async function api(path, options = {}) {
@@ -226,6 +256,9 @@ function resetWorkflow() {
 
 function startWorkflow(file) {
   stopWorkflowTimer();
+  if (activeEventSource) activeEventSource.close();
+  resetTerminal(file.name);
+  appendTerminalLine("file queued");
   analysisStartedAt = performance.now();
   activeStep = "queued";
   els.analysisState.textContent = `${file.name} queued`;
@@ -314,7 +347,9 @@ async function analyzeVideo(event) {
   form.append("video", file);
   form.append("threshold", els.thresholdInput.value);
   try {
-    const data = await uploadForAnalysis(form);
+    const job = await uploadForAnalysis(form);
+    appendTerminalLine(`server accepted job ${job.job_id}`);
+    const data = await streamAnalysisJob(job.job_id);
     setWorkflowStep("completed", "complete");
     completeWorkflow(data);
     renderUpload(data);
@@ -357,6 +392,56 @@ function uploadForAnalysis(form) {
     xhr.addEventListener("error", () => reject(new Error("Upload failed")));
     xhr.send(form);
   });
+}
+
+function streamAnalysisJob(jobId) {
+  return new Promise((resolve, reject) => {
+    activeEventSource = new EventSource(`/api/analyze-video/${jobId}/events`);
+    activeEventSource.onmessage = (event) => {
+      let data = {};
+      try {
+        data = JSON.parse(event.data || "{}");
+      } catch (err) {
+        appendTerminalLine("could not parse server event", "error");
+        return;
+      }
+
+      if (data.type === "log") {
+        appendTerminalLine(data.message);
+        syncWorkflowFromTerminal(data.message);
+      } else if (data.type === "complete") {
+        appendTerminalLine(data.message || "analysis complete", "complete");
+        activeEventSource.close();
+        activeEventSource = null;
+        resolve(data.result);
+      } else if (data.type === "error") {
+        appendTerminalLine(data.message || "analysis failed", "error");
+        activeEventSource.close();
+        activeEventSource = null;
+        reject(new Error(data.message || "Analysis failed"));
+      }
+    };
+    activeEventSource.onerror = () => {
+      appendTerminalLine("event stream disconnected", "error");
+      if (activeEventSource) activeEventSource.close();
+      activeEventSource = null;
+      reject(new Error("Analysis event stream disconnected"));
+    };
+  });
+}
+
+function syncWorkflowFromTerminal(message) {
+  if (message.startsWith("[video]") || message.startsWith("[frames]")) {
+    setWorkflowStep("frames", "running", message.replace(/^\[[^\]]+\]\s*/, ""));
+  } else if (message.startsWith("[clips]") || message.startsWith("[features]") || message.startsWith("[videomae]")) {
+    setWorkflowStep("features", "running", message.replace(/^\[[^\]]+\]\s*/, ""));
+  } else if (message.startsWith("[model] scoring") || message.startsWith("[timeline]") || message.startsWith("[calc]")) {
+    setWorkflowStep("scoring", "running", message.replace(/^\[[^\]]+\]\s*/, ""));
+  } else if (message.startsWith("[metrics]")) {
+    setWorkflowStep("scoring", "running", "Loading metrics");
+  } else if (message.startsWith("[done]")) {
+    setWorkflowStep("completed", "complete", "Scoring completed");
+  }
 }
 
 function renderUpload(data) {
@@ -513,6 +598,7 @@ function renderFrameGallery(samples) {
 els.startBtn.addEventListener("click", startCamera);
 els.stopBtn.addEventListener("click", stopCamera);
 els.resetBtn.addEventListener("click", reset);
+els.clearTerminalBtn.addEventListener("click", () => resetTerminal());
 els.infoBtn.addEventListener("click", openInfoModal);
 els.closeInfoBtn.addEventListener("click", closeInfoModal);
 els.infoModal.addEventListener("click", (event) => {

@@ -6,13 +6,16 @@ import time
 from collections import deque
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
 from werkzeug.datastructures import FileStorage
 
 from vad_platform.config import RuntimeConfig, default_config
+
+
+ProgressCallback = Callable[[str], None]
 
 
 class ViolenceDetectionService:
@@ -161,93 +164,123 @@ class ViolenceDetectionService:
         result["clear_threshold"] = clear_threshold
         return result
 
-    def analyze_uploaded_video(self, video_file: FileStorage, threshold: float | None = None) -> dict[str, Any]:
-        if not self._ensure_runtime():
-            return self._not_ready()
-
-        started_at = time.perf_counter()
-        phase_times: dict[str, float] = {}
+    def analyze_uploaded_video(
+        self,
+        video_file: FileStorage,
+        threshold: float | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
         suffix = Path(video_file.filename or "upload.mp4").suffix or ".mp4"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             video_path = Path(tmp.name)
             video_file.save(tmp)
 
         try:
-            read_started = time.perf_counter()
-            frames, fps, duration = _read_video(video_path)
-            phase_times["read_video_seconds"] = round(time.perf_counter() - read_started, 3)
-            clips = _build_clips(
-                frames,
-                clip_len=self.config.clip_len,
-                frame_skip=self.config.frame_skip,
-                clip_stride=self.config.clip_stride,
+            return self.analyze_video_path(
+                video_path,
+                filename=video_file.filename,
+                threshold=threshold,
+                progress=progress,
             )
-            if not clips:
-                return {"error": "No readable frames found in uploaded video"}
-
-            features = []
-            clip_times = []
-            extract_started = time.perf_counter()
-            for clip_frames, start_idx in clips:
-                features.append(self._runtime.extract_clip_feature(clip_frames))
-                clip_times.append(start_idx / max(fps, 1.0))
-            phase_times["feature_extraction_seconds"] = round(time.perf_counter() - extract_started, 3)
-
-            feature_array = np.stack(features, axis=0)
-            active_threshold = threshold if threshold is not None else self.config.threshold
-            scoring_started = time.perf_counter()
-            overall = self._runtime.predict(feature_array, active_threshold)
-            timeline = self._score_timeline(feature_array, clip_times, fps, duration, active_threshold)
-            phase_times["scoring_seconds"] = round(time.perf_counter() - scoring_started, 3)
-            anomaly_segments = [s for s in timeline if s["prob_anomaly"] >= active_threshold]
-            peak_segment = max(timeline, key=lambda s: s["prob_anomaly"], default=None)
-            peak_score = max((s["prob_anomaly"] for s in timeline), default=overall["prob_anomaly"])
-            avg_score = float(np.mean([s["prob_anomaly"] for s in timeline])) if timeline else overall["prob_anomaly"]
-            anomaly_seconds = _segment_union_seconds(anomaly_segments)
-            coverage = anomaly_seconds / max(duration, 0.001)
-            frame_samples = _build_frame_samples(frames, fps, timeline, peak_segment)
-            operational_score = max(overall["prob_anomaly"], peak_score)
-            operational = {
-                "prob_anomaly": operational_score,
-                "prob_normal": 1.0 - operational_score,
-                "prediction": "ANOMALY" if operational_score >= active_threshold else "NORMAL",
-                "confidence": max(operational_score, 1.0 - operational_score),
-                "basis": "peak_segment" if peak_score >= overall["prob_anomaly"] else "whole_video",
-            }
-
-            return {
-                "filename": video_file.filename,
-                "duration": duration,
-                "fps": fps,
-                "clips": len(clips),
-                "threshold": active_threshold,
-                "overall": overall,
-                "operational": operational,
-                "timeline": timeline,
-                "anomaly_segments": anomaly_segments,
-                "peak_score": peak_score,
-                "peak_segment": peak_segment,
-                "frame_samples": frame_samples,
-                "metrics": {
-                    "frames": len(frames),
-                    "fps": round(fps, 2),
-                    "duration_seconds": round(duration, 2),
-                    "clips": len(clips),
-                    "features": int(feature_array.shape[0]),
-                    "feature_dim": int(feature_array.shape[1]),
-                    "timeline_segments": len(timeline),
-                    "anomaly_segments": len(anomaly_segments),
-                    "anomaly_seconds": round(anomaly_seconds, 2),
-                    "anomaly_coverage": round(coverage, 4),
-                    "average_score": avg_score,
-                    "peak_score": peak_score,
-                    "threshold": active_threshold,
-                    "processing_seconds": round(time.perf_counter() - started_at, 3),
-                    "phase_times": phase_times,
-                },
-            }
         finally:
             video_path.unlink(missing_ok=True)
+
+    def analyze_video_path(
+        self,
+        video_path: Path,
+        filename: str | None = None,
+        threshold: float | None = None,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        _progress(progress, "$ avt analyze --mode upload")
+        _progress(progress, f"[input] file={filename or video_path.name}")
+        _progress(progress, f"[input] threshold={threshold if threshold is not None else self.config.threshold:.3f}")
+        if not self._ensure_runtime(progress):
+            return self._not_ready()
+
+        started_at = time.perf_counter()
+        phase_times: dict[str, float] = {}
+        read_started = time.perf_counter()
+        frames, fps, duration = _read_video(video_path, progress)
+        phase_times["read_video_seconds"] = round(time.perf_counter() - read_started, 3)
+        _progress(progress, f"[frames] loaded={len(frames)} fps={fps:.2f} duration={duration:.2f}s")
+        clips = _build_clips(
+            frames,
+            clip_len=self.config.clip_len,
+            frame_skip=self.config.frame_skip,
+            clip_stride=self.config.clip_stride,
+        )
+        _progress(progress, f"[clips] built={len(clips)} clip_len={self.config.clip_len} frame_skip={self.config.frame_skip}")
+        if not clips:
+            _progress(progress, "[error] no readable frames found")
+            return {"error": "No readable frames found in uploaded video"}
+
+        features = []
+        clip_times = []
+        extract_started = time.perf_counter()
+        for index, (clip_frames, start_idx) in enumerate(clips, start=1):
+            _progress(progress, f"[features] extracting feature {index}/{len(clips)} start_frame={start_idx}")
+            features.append(self._runtime.extract_clip_feature(clip_frames))
+            clip_times.append(start_idx / max(fps, 1.0))
+            _progress(progress, f"[features] feature {index} ready shape=(768,) t={clip_times[-1]:.2f}s")
+        phase_times["feature_extraction_seconds"] = round(time.perf_counter() - extract_started, 3)
+
+        feature_array = np.stack(features, axis=0)
+        active_threshold = threshold if threshold is not None else self.config.threshold
+        scoring_started = time.perf_counter()
+        _progress(progress, f"[model] scoring full tensor shape={tuple(feature_array.shape)}")
+        overall = self._runtime.predict(feature_array, active_threshold, progress=progress, label="overall")
+        timeline = self._score_timeline(feature_array, clip_times, fps, duration, active_threshold, progress)
+        phase_times["scoring_seconds"] = round(time.perf_counter() - scoring_started, 3)
+        _progress(progress, "[metrics] loading timeline metrics")
+        anomaly_segments = [s for s in timeline if s["prob_anomaly"] >= active_threshold]
+        peak_segment = max(timeline, key=lambda s: s["prob_anomaly"], default=None)
+        peak_score = max((s["prob_anomaly"] for s in timeline), default=overall["prob_anomaly"])
+        avg_score = float(np.mean([s["prob_anomaly"] for s in timeline])) if timeline else overall["prob_anomaly"]
+        anomaly_seconds = _segment_union_seconds(anomaly_segments)
+        coverage = anomaly_seconds / max(duration, 0.001)
+        frame_samples = _build_frame_samples(frames, fps, timeline, peak_segment, progress=progress)
+        operational_score = max(overall["prob_anomaly"], peak_score)
+        operational = {
+            "prob_anomaly": operational_score,
+            "prob_normal": 1.0 - operational_score,
+            "prediction": "ANOMALY" if operational_score >= active_threshold else "NORMAL",
+            "confidence": max(operational_score, 1.0 - operational_score),
+            "basis": "peak_segment" if peak_score >= overall["prob_anomaly"] else "whole_video",
+        }
+        _progress(progress, f"[done] scoring completed prediction={operational['prediction']} threat={operational_score:.4f}")
+
+        return {
+            "filename": filename,
+            "duration": duration,
+            "fps": fps,
+            "clips": len(clips),
+            "threshold": active_threshold,
+            "overall": overall,
+            "operational": operational,
+            "timeline": timeline,
+            "anomaly_segments": anomaly_segments,
+            "peak_score": peak_score,
+            "peak_segment": peak_segment,
+            "frame_samples": frame_samples,
+            "metrics": {
+                "frames": len(frames),
+                "fps": round(fps, 2),
+                "duration_seconds": round(duration, 2),
+                "clips": len(clips),
+                "features": int(feature_array.shape[0]),
+                "feature_dim": int(feature_array.shape[1]),
+                "timeline_segments": len(timeline),
+                "anomaly_segments": len(anomaly_segments),
+                "anomaly_seconds": round(anomaly_seconds, 2),
+                "anomaly_coverage": round(coverage, 4),
+                "average_score": avg_score,
+                "peak_score": peak_score,
+                "threshold": active_threshold,
+                "processing_seconds": round(time.perf_counter() - started_at, 3),
+                "phase_times": phase_times,
+            },
+        }
 
     def _score_timeline(
         self,
@@ -256,6 +289,7 @@ class ViolenceDetectionService:
         fps: float,
         duration: float,
         threshold: float,
+        progress: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         segment_clips = self.config.segment_clips
         step = max(1, segment_clips // 2)
@@ -265,7 +299,8 @@ class ViolenceDetectionService:
             end = min(start + segment_clips, len(features))
             if start >= end:
                 continue
-            result = self._runtime.predict(features[start:end], threshold)
+            _progress(progress, f"[timeline] segment {len(timeline) + 1} clips={start}:{end}")
+            result = self._runtime.predict(features[start:end], threshold, progress=progress, label=f"segment_{len(timeline) + 1}")
             t_start = clip_times[start]
             t_end = clip_times[end - 1] + (self.config.clip_len * self.config.frame_skip / max(fps, 1.0))
             timeline.append(
@@ -278,19 +313,23 @@ class ViolenceDetectionService:
             )
 
         if not timeline:
-            result = self._runtime.predict(features, threshold)
+            result = self._runtime.predict(features, threshold, progress=progress, label="timeline_fallback")
             timeline.append({"start": 0.0, "end": round(duration, 2), **result})
         return timeline
 
-    def _ensure_runtime(self) -> bool:
+    def _ensure_runtime(self, progress: ProgressCallback | None = None) -> bool:
         if self._runtime is not None:
+            _progress(progress, f"[runtime] cached device={getattr(self._runtime, 'device_name', 'ready')}")
             return True
         try:
-            self._runtime = _TorchRuntime(self.config)
+            _progress(progress, "[runtime] loading weights and feature extractor")
+            self._runtime = _TorchRuntime(self.config, progress=progress)
             self._runtime_error = None
+            _progress(progress, "[runtime] ready")
             return True
         except Exception as exc:  # surfaced through /api/health and UI
             self._runtime_error = str(exc)
+            _progress(progress, f"[runtime] error={exc}")
             return False
 
     def _not_ready(self) -> dict[str, Any]:
@@ -302,7 +341,8 @@ class ViolenceDetectionService:
 
 
 class _TorchRuntime:
-    def __init__(self, config: RuntimeConfig):
+    def __init__(self, config: RuntimeConfig, progress: ProgressCallback | None = None):
+        _progress(progress, "[runtime] importing torch and transformers")
         import torch
         import torch.nn.functional as F
         from transformers.models.auto.image_processing_auto import AutoImageProcessor
@@ -318,7 +358,9 @@ class _TorchRuntime:
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+        _progress(progress, f"[runtime] device={self.device_name}")
 
+        _progress(progress, "[model] building AnomalyTransformer")
         self.model = AnomalyTransformer(
             feat_dim=config.feat_dim,
             d_model=config.d_model,
@@ -329,14 +371,18 @@ class _TorchRuntime:
             max_frames=config.max_frames,
         ).to(self.device)
 
+        _progress(progress, f"[weights] loading {config.checkpoint_path.name}")
         checkpoint = torch.load(config.checkpoint_path, map_location=self.device, weights_only=False)
         state_dict = checkpoint.get("model_state") if isinstance(checkpoint, dict) else None
         if state_dict is None:
             state_dict = checkpoint.get("model_state_dict") if isinstance(checkpoint, dict) else checkpoint
         self.model.load_state_dict(state_dict)
         self.model.eval()
+        _progress(progress, f"[weights] loaded tensors={len(state_dict)}")
 
+        _progress(progress, f"[videomae] loading processor {config.videomae_name}")
         self.feature_extractor = AutoImageProcessor.from_pretrained(config.videomae_name)
+        _progress(progress, f"[videomae] loading model {config.videomae_name}")
         self.feature_model = VideoMAEModel.from_pretrained(config.videomae_name).to(self.device)
         self.feature_model.eval()
         if self.device.type == "cuda":
@@ -354,8 +400,15 @@ class _TorchRuntime:
             feature = outputs.last_hidden_state[0].mean(dim=0).cpu().numpy()
         return feature.astype(np.float32)
 
-    def predict(self, feature_array: np.ndarray, threshold: float) -> dict[str, Any]:
+    def predict(
+        self,
+        feature_array: np.ndarray,
+        threshold: float,
+        progress: ProgressCallback | None = None,
+        label: str = "window",
+    ) -> dict[str, Any]:
         feat = self._pad_or_trim(feature_array)
+        _progress(progress, f"[calc] {label}: pad_or_trim {feature_array.shape} -> {feat.shape}")
         feat_t = self.torch.from_numpy(feat).unsqueeze(0).to(self.device)
         with self.torch.no_grad():
             with self.torch.autocast(
@@ -368,6 +421,10 @@ class _TorchRuntime:
         prob_normal = float(probs[0])
         prob_anomaly = float(probs[1])
         prediction = "ANOMALY" if prob_anomaly >= threshold else "NORMAL"
+        _progress(
+            progress,
+            f"[calc] {label}: normal={prob_normal:.4f} threat={prob_anomaly:.4f} threshold={threshold:.4f} => {prediction}",
+        )
         return {
             "prob_normal": prob_normal,
             "prob_anomaly": prob_anomaly,
@@ -435,20 +492,29 @@ def _focus_screen_region(frame: np.ndarray) -> np.ndarray:
     return frame[y0:y1, x0:x1]
 
 
-def _read_video(video_path: Path) -> tuple[list[np.ndarray], float, float]:
+def _progress(progress: ProgressCallback | None, message: str) -> None:
+    if progress:
+        progress(message)
+
+
+def _read_video(video_path: Path, progress: ProgressCallback | None = None) -> tuple[list[np.ndarray], float, float]:
     import cv2
 
+    _progress(progress, f"[video] opening {video_path.name}")
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return [], 0.0, 0.0
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     frames = []
+    _progress(progress, f"[video] fps={fps:.2f}")
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        if len(frames) <= 3 or len(frames) % 50 == 0:
+            _progress(progress, f"[frames] extracted frame {len(frames)}")
     cap.release()
 
     duration = len(frames) / max(fps, 1.0)
@@ -499,6 +565,7 @@ def _build_frame_samples(
     timeline: list[dict[str, Any]],
     peak_segment: dict[str, Any] | None,
     max_samples: int = 6,
+    progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     if not frames:
         return []
@@ -519,6 +586,7 @@ def _build_frame_samples(
             continue
         used_indices.add(frame_index)
         scored = _score_at_time(timeline, frame_index / max(fps, 1.0))
+        _progress(progress, f"[preview] extracted frame sample {len(samples) + 1} index={frame_index} score={scored['prob_anomaly']:.4f}")
         samples.append(
             {
                 "time": round(frame_index / max(fps, 1.0), 2),
