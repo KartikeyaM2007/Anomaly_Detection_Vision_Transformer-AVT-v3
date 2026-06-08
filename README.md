@@ -7,6 +7,8 @@ sdk: docker
 pinned: false
 ---
 
+# Web Version : https://huggingface.co/spaces/Kartikeym2007/Anomaly_Detection_Vision_Transformer-AVT  || Note Since its hosted on  Hugging Face , you can just see the layout and run model on ( cpu / hugging face free tier cpus )- So it will be slow!!
+
 # Violence Detection Platform
 
 A Flask-based violence/anomaly detection platform using a trained VideoMAE feature
